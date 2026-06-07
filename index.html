@@ -295,6 +295,10 @@ footer{background:#050505;border-top:1px solid var(--border);padding:60px 0 28px
 .ap-back:hover{background:rgba(201,168,76,.2)}
 .ap-logout{padding:8px 16px;border:1px solid rgba(255,80,80,.3);color:#ff6b6b;border-radius:6px;font-size:.72rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .2s;font-family:var(--fb);background:transparent;white-space:nowrap}
 .ap-logout:hover{background:rgba(255,80,80,.1)}
+/* ── SYNC INDICATOR ── */
+.sync-ind{font-size:.7rem;letter-spacing:.08em;padding:4px 10px;border-radius:4px;transition:all .3s;font-family:var(--fb);white-space:nowrap;opacity:0}
+.sync-ind.ok{color:#4ade80;background:rgba(74,222,128,.1);border:1px solid rgba(74,222,128,.2);opacity:1}
+.sync-ind.err{color:#f87171;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.2);opacity:1}
 .apcontent{padding:2rem;max-width:1200px;margin:0 auto}
 .apsec{display:none}
 .apsec.on{display:block}
@@ -737,6 +741,8 @@ footer{background:#050505;border-top:1px solid var(--border);padding:60px 0 28px
       <button class="aptab" id="aptab-personalizacion" onclick="apSwitchTab('personalizacion',this)">⚙️ Personalización</button>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+      <span id="sync-indicator" class="sync-ind"></span>
+      <button class="ap-back" id="cloud-cfg-btn" onclick="showCloudSetup()" title="Configurar almacenamiento en la nube" style="display:none">☁ Configurar Cloud</button>
       <button class="ap-back" onclick="exitAdminPanel()" title="Volver al sitio sin cerrar sesión">← Salir del panel</button>
       <button class="ap-logout" onclick="adminLogout()">Cerrar sesión</button>
     </div>
@@ -823,6 +829,52 @@ footer{background:#050505;border-top:1px solid var(--border);padding:60px 0 28px
 /* ── ICONS ── */
 const ICONS={cut:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>`,razor:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="3" width="16" height="5" rx="1"/><path d="M4 8l8 13 8-13"/></svg>`,beard:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="8" r="4"/><path d="M6 21v-2a6 6 0 0112 0v2"/><path d="M9 14s1 2 3 2 3-2 3-2"/></svg>`,combo:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,brow:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 10 C6 7, 18 7, 21 10"/><path d="M3 14 C6 11, 18 11, 21 14"/></svg>`,style:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>`};
 
+/* ════════════════════════════════════════════════════════════
+   WESTI — CLOUD STORAGE LAYER v2.0
+   • JSONBin.io  → settings, turnos, galería (JSON)
+   • Cloudinary  → imágenes (upload directo desde browser)
+   • localStorage → caché local + fallback offline
+   ════════════════════════════════════════════════════════════ */
+
+/* ── Cloud config ── */
+function getCfg(){try{return JSON.parse(localStorage.getItem('westi_cloud_cfg')||'null');}catch(e){return null;}}
+function saveCfg(cfg){localStorage.setItem('westi_cloud_cfg',JSON.stringify(cfg));}
+function hasCfg(){const c=getCfg();return!!(c?.jsonbinKey&&c?.binId);}
+
+/* ── JSONBin helpers ── */
+const JSONBIN_BASE='https://api.jsonbin.io/v3';
+async function jbGet(binId,key){
+  try{const cfg=getCfg();const r=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});if(!r.ok)return null;const data=await r.json();return key?data[key]:data;}catch(e){return null;}}
+async function jbSet(binId,key,value){
+  try{const cfg=getCfg();let current={};const r0=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});if(r0.ok)current=await r0.json();if(key)current[key]=value;else current=value;const r=await fetch(`${JSONBIN_BASE}/b/${binId}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey},body:JSON.stringify(current)});return r.ok;}catch(e){return false;}}
+async function createBin(name,initialData){
+  const cfg=getCfg();const r=await fetch(`${JSONBIN_BASE}/b`,{method:'POST',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},body:JSON.stringify(initialData)});if(!r.ok)return null;const d=await r.json();return d.metadata?.id||null;}
+
+/* ── Cloudinary ── */
+async function uploadToCloudinary(file){
+  const cfg=getCfg();
+  if(!cfg?.cloudName||!cfg?.cloudPreset){return new Promise(res=>{const fr=new FileReader();fr.onload=e=>res(e.target.result);fr.readAsDataURL(file);});}
+  const fd=new FormData();fd.append('file',file);fd.append('upload_preset',cfg.cloudPreset);
+  try{const r=await fetch(`https://api.cloudinary.com/v1_1/${cfg.cloudName}/image/upload`,{method:'POST',body:fd});if(!r.ok)throw new Error();const d=await r.json();return d.secure_url||null;}
+  catch(e){return new Promise(res=>{const fr=new FileReader();fr.onload=e=>res(e.target.result);fr.readAsDataURL(file);});}}
+
+/* ── Sync engine ── */
+let _syncPending=false;let _syncTimer=null;
+function schedulSync(){_syncPending=true;clearTimeout(_syncTimer);_syncTimer=setTimeout(()=>syncToCloud(),1500);}
+async function syncToCloud(){
+  if(!hasCfg()||!_syncPending)return;_syncPending=false;const cfg=getCfg();
+  const ok=await jbSet(cfg.binId,'settings',S);
+  if(ok){showSyncIndicator('ok');localStorage.setItem('westi_settings',JSON.stringify(S));}
+  else{showSyncIndicator('err');_syncPending=true;}}
+function showSyncIndicator(state){
+  let ind=document.getElementById('sync-indicator');if(!ind)return;
+  ind.className='sync-ind '+(state==='ok'?'ok':'err');
+  ind.textContent=state==='ok'?'☁ Guardado':'⚠ Error al guardar';
+  clearTimeout(ind._t);ind._t=setTimeout(()=>{ind.className='sync-ind';ind.textContent='';},3000);}
+function updateSyncStatus(){
+  const ind=document.getElementById('sync-indicator');if(!ind)return;
+  if(hasCfg()){ind.className='sync-ind ok';ind.textContent='☁ Cloud activo';setTimeout(()=>{ind.className='sync-ind';ind.textContent='';},3000);}}
+
 /* ── DEFAULT SETTINGS ── */
 const DEFAULT={name:'WESTI',tagline:'Más que un corte. Una experiencia.',eyebrow:'Barbería Premium · Buenos Aires',colorGold:'#C9A84C',colorBg:'#0A0A0A',colorCream:'#F5F0E8',fontHeading:'Bebas Neue',fontBody:'DM Sans',whatsapp:'5491112345678',address:'Av. Corrientes 1234, CABA\nBuenos Aires, Argentina',hours:'Lun – Sáb: 9:00 a 19:30\nDomingo: cerrado',instagram:'westi_barberia',tiktok:'westi_barberia',aboutTitle:'Más que una barbería',aboutLabel:'Nuestra historia',aboutText1:'Westi nació de la pasión por el oficio y la convicción de que un buen corte puede cambiarle el día a alguien. Cada cliente que entra por la puerta merece atención personalizada, técnica impecable y un ambiente donde sentirse cómodo.',aboutText2:'Con años de experiencia en las mejores barberías de Buenos Aires, traemos un nivel de detalle y cuidado que va más allá del corte. Esto es estilo de vida.',stat1:'5+',stat1l:'Años de experiencia',stat2:'2k+',stat2l:'Clientes atendidos',stat3:'8k+',stat3l:'Cortes realizados',closedDays:[0],openHour:9,closeHour:19,slotMin:30,services:[{id:'s1',name:'Corte Clásico',desc:'Tijera y máquina, corte limpio y preciso a tu estilo.',price:'$3.500',icon:'cut'},{id:'s2',name:'Fade / Degradé',desc:'Transición perfecta de cero a largo. Definición total.',price:'$4.000',icon:'cut'},{id:'s3',name:'Barba Completa',desc:'Perfilado, diseño y afeitado con toalla caliente.',price:'$3.000',icon:'beard'},{id:'s4',name:'Corte + Barba',desc:'El combo completo para lucir impecable de pies a cabeza.',price:'$6.000',icon:'combo'},{id:'s5',name:'Diseño de Cejas',desc:'Perfilado y limpieza para un look definido y prolijo.',price:'$1.500',icon:'brow'},{id:'s6',name:'Keratina Express',desc:'Alisado exprés para pelo rebelde y difícil de manejar.',price:'$5.000',icon:'style'}],barbers:[{id:'b1',name:'Westi',tag:'Fundador & Master Barber',initials:'W'},{id:'b2',name:'Lucas',tag:'Especialista en Fades',initials:'L'},{id:'b3',name:'Mateo',tag:'Barbas & Diseño',initials:'M'}]};
 
@@ -851,12 +903,21 @@ let apCurrentSort={col:'fecha',dir:'asc'};
 let loginAttempts=0;
 
 /* ── STORAGE HELPERS ── */
-function loadSettings(){try{const s=localStorage.getItem('westi_settings');S=s?{...DEFAULT,...JSON.parse(s)}:{...DEFAULT}}catch(e){S={...DEFAULT}}}
-function getTurnos(){try{return JSON.parse(localStorage.getItem('westi_all_turnos')||'[]')}catch(e){return[]}}
-function saveTurnos(t){localStorage.setItem('westi_all_turnos',JSON.stringify(t))}
-function getGallery(){try{const g=localStorage.getItem('westi_gallery');return g?JSON.parse(g):[...DEFAULT_GALLERY]}catch(e){return[...DEFAULT_GALLERY]}}
-function saveGallery(g){localStorage.setItem('westi_gallery',JSON.stringify(g))}
+async function loadSettings(){
+  if(hasCfg()){const cfg=getCfg();const remote=await jbGet(cfg.binId,'settings');if(remote){S={...DEFAULT,...remote};localStorage.setItem('westi_settings',JSON.stringify(S));return;}}
+  try{const s=localStorage.getItem('westi_settings');S=s?{...DEFAULT,...JSON.parse(s)}:{...DEFAULT}}catch(e){S={...DEFAULT};}}
+function getTurnos(){try{return JSON.parse(localStorage.getItem('westi_all_turnos')||'[]')}catch(e){return[];}}
+async function saveTurnos(t){
+  localStorage.setItem('westi_all_turnos',JSON.stringify(t));
+  if(hasCfg()){const cfg=getCfg();const ok=await jbSet(cfg.binId,'turnos',t);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
+function getGallery(){try{const g=localStorage.getItem('westi_gallery');return g?JSON.parse(g):[...DEFAULT_GALLERY];}catch(e){return[...DEFAULT_GALLERY];}}
+async function saveGallery(g){
+  localStorage.setItem('westi_gallery',JSON.stringify(g));
+  if(hasCfg()){const cfg=getCfg();const ok=await jbSet(cfg.binId,'gallery',g);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
 function isLoggedIn(){return localStorage.getItem('westi_admin_session')==='active'||sessionStorage.getItem('westi_admin_session')==='active'}
+async function syncTurnosFromCloud(){const remote=hasCfg()?await jbGet(getCfg().binId,'turnos'):null;if(remote){localStorage.setItem('westi_all_turnos',JSON.stringify(remote));renderAdminTable();renderAdminStats();}}
+async function syncGalleryFromCloud(){if(!hasCfg())return;const remote=await jbGet(getCfg().binId,'gallery');if(remote){localStorage.setItem('westi_gallery',JSON.stringify(remote));renderPublicGallery();if(canAccess('galeria'))renderAdminGallery();}}
+async function loadCloudImages(){if(!hasCfg())return;const imgs=await jbGet(getCfg().binId,'images');if(!imgs)return;if(imgs.hero)localStorage.setItem('westi_hero_img',imgs.hero);if(imgs.about)localStorage.setItem('westi_about_img',imgs.about);}
 
 /* ── TOAST ── */
 function showToast(msg,type=''){
@@ -964,7 +1025,8 @@ function openAdminPanel(){
   document.getElementById('admin-panel').classList.add('on');
   renderAdminStats();
   renderAdminTable();
-  if(canAccess('galeria'))renderAdminGallery();
+  syncTurnosFromCloud(); // sync silencioso desde cloud
+  if(canAccess('galeria')){syncGalleryFromCloud();renderAdminGallery();}
   if(canAccess('personalizacion')){
     const persBody=document.getElementById('ap-pers-body');
     if(persBody)renderApPersContent(apActivePersonalizacion,persBody);
@@ -1260,7 +1322,8 @@ function toggleGallery(){
 function saveSettings(){
   localStorage.setItem('westi_settings',JSON.stringify(S));
   applySettings();
-  showToast('¡Cambios guardados! ✓','ok');
+  schedulSync();
+  showToast('Guardando... ☁','ok');
 }
 
 function getWaUrl(text){
@@ -1460,56 +1523,33 @@ function renderTabContent(tab){}
 function renderServicesList(){return S.services.map(s=>`<div class="csli" id="sli-${s.id}"><div class="csli-info"><div class="csli-nm">${s.name}</div><div class="csli-pr">${s.price}</div></div><div class="csli-acts"><button class="ib" onclick="openEditService('${s.id}')">✎</button><button class="ib del" onclick="deleteService('${s.id}')">✕</button></div></div>`).join('');}
 function renderBarbersList(){return S.barbers.map(b=>`<div class="csli" id="bli-${b.id}"><div class="bav" style="width:38px;height:38px;font-size:1rem;flex-shrink:0">${b.initials}</div><div class="csli-info"><div class="csli-nm">${b.name}</div><div class="csli-pr">${b.tag}</div></div><div class="csli-acts"><button class="ib" onclick="openEditBarber('${b.id}')">✎</button><button class="ib del" onclick="deleteBarber('${b.id}')">✕</button></div></div>`).join('');}
 
-function liveUpdate(key,value){S[key]=value;applySettings();localStorage.setItem('westi_settings',JSON.stringify(S));}
+function liveUpdate(key,value){S[key]=value;applySettings();localStorage.setItem('westi_settings',JSON.stringify(S));schedulSync();}
 
 /* ── IMAGE MANAGEMENT (hero bg + about/nosotros) ── */
-function handleImgUpload(ev, target){
+async function handleImgUpload(ev, target){
   const file=ev.target.files[0]; if(!file)return;
-  const reader=new FileReader();
-  reader.onload=e=>{
-    const dataUrl=e.target.result;
-    if(target==='hero'){
-      localStorage.setItem('westi_hero_img',dataUrl);
-      applyImages();
-      const prev=document.getElementById('hero-img-preview');
-      if(prev)prev.src=dataUrl;
-    } else {
-      localStorage.setItem('westi_about_img',dataUrl);
-      applyImages();
-      const prev=document.getElementById('about-img-preview');
-      if(prev)prev.src=dataUrl;
-    }
-    const b=document.getElementById('ap-pers-body');
-    if(b)renderApPersContent('imagen',b);
-    showToast('Imagen guardada ✓','ok');
-  };
-  reader.readAsDataURL(file);
-}
-
-function resetImg(target){
-  if(target==='hero'){
-    localStorage.removeItem('westi_hero_img');
-  } else {
-    localStorage.removeItem('westi_about_img');
-  }
+  showToast('Subiendo imagen... ☁');
+  const url=await uploadToCloudinary(file);
+  if(!url){showToast('Error al subir imagen','err');return;}
+  const lsKey=target==='hero'?'westi_hero_img':'westi_about_img';
+  localStorage.setItem(lsKey,url);
+  if(hasCfg()){const cfg=getCfg();const imgs=(await jbGet(cfg.binId,'images'))||{};imgs[target]=url;await jbSet(cfg.binId,'images',imgs);}
   applyImages();
-  const b=document.getElementById('ap-pers-body');
-  if(b)renderApPersContent('imagen',b);
-  showToast('Imagen restaurada','ok');
-}
-
+  const prev=document.getElementById(target==='hero'?'hero-img-preview':'about-img-preview');
+  if(prev)prev.src=url;
+  const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);
+  showToast('Imagen guardada ✓','ok');}
+async function resetImg(target){
+  const lsKey=target==='hero'?'westi_hero_img':'westi_about_img';
+  localStorage.removeItem(lsKey);
+  if(hasCfg()){const cfg=getCfg();const imgs=(await jbGet(cfg.binId,'images'))||{};delete imgs[target];await jbSet(cfg.binId,'images',imgs);}
+  applyImages();const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);showToast('Imagen restaurada','ok');}
 function applyImages(){
-  const heroImg=localStorage.getItem('westi_hero_img');
-  const aboutImgSrc=localStorage.getItem('westi_about_img');
+  const heroImg=localStorage.getItem('westi_hero_img');const aboutImgSrc=localStorage.getItem('westi_about_img');
   const defaultHero='https://images.unsplash.com/photo-1503951914875-452162b0f3f1?w=1600&q=80';
   const defaultAbout='https://images.unsplash.com/photo-1503951914875-452162b0f3f1?w=800&q=80';
-  const heroBg=document.getElementById('hero-bg');
-  if(heroBg)heroBg.style.backgroundImage=`url('${heroImg||defaultHero}')`;
-  const aboutImg=document.getElementById('about-img');
-  if(aboutImg)aboutImg.src=aboutImgSrc||defaultAbout;
-}
-
-// Legacy stubs for compatibility
+  const heroBg=document.getElementById('hero-bg');if(heroBg)heroBg.style.backgroundImage=`url('${heroImg||defaultHero}')`;
+  const aboutImg=document.getElementById('about-img');if(aboutImg)aboutImg.src=aboutImgSrc||defaultAbout;}
 function handleHeroImgUpload(ev){handleImgUpload(ev,'hero');}
 function applyHeroImage(src){const bg=document.getElementById('hero-bg');if(bg)bg.style.backgroundImage=`url('${src}')`;}
 function resetHeroImg(){resetImg('hero');}
@@ -1548,10 +1588,12 @@ function saveModal(){
 }
 function closeModal(){el('modal').classList.remove('on');}
 
-document.addEventListener('DOMContentLoaded',()=>{
-  loadSettings();
+document.addEventListener('DOMContentLoaded',async()=>{
+  await loadSettings();       // cloud-first, fallback local
   applySettings();
-  applyImages(); // aplica hero bg + about img guardados
+  await loadCloudImages();    // cargar URLs de imágenes desde cloud
+  applyImages();
+  await syncGalleryFromCloud(); // galería sincronizada
   initReveal();
   goToStep(1);
   renderCalendar();
@@ -1559,10 +1601,109 @@ document.addEventListener('DOMContentLoaded',()=>{
   if(isLoggedIn()){
     document.getElementById('admin-nav-btn').textContent='Panel Admin';
   }
+  updateSyncStatus();
 });
 
 el('modal').addEventListener('click',e=>{if(e.target===el('modal'))closeModal();});
 document.getElementById('admin-login-overlay').addEventListener('click',function(e){if(e.target===this)closeAdminLogin();});
+
+/* ════════════════════════════════════════════════════════════
+   CLOUD SETUP WIZARD
+   Se muestra al abrir el panel si no hay cloud configurado.
+   ════════════════════════════════════════════════════════════ */
+function checkCloudSetupNeeded(){
+  const cfgBtn=document.getElementById('cloud-cfg-btn');
+  if(!hasCfg()){
+    if(cfgBtn)cfgBtn.style.display='';
+    // Mostrar setup solo si no fue descartado en esta sesión
+    if(!sessionStorage.getItem('westi_skip_setup')){
+      setTimeout(()=>showCloudSetup(),400);
+    }
+  } else {
+    if(cfgBtn)cfgBtn.style.display='none';
+  }
+}
+
+function showCloudSetup(){
+  if(document.getElementById('cloud-setup'))return;
+  const overlay=document.createElement('div');
+  overlay.id='cloud-setup';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:3600;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(12px)';
+  overlay.innerHTML=`
+    <div style="background:#111;border:1px solid rgba(201,168,76,.3);border-radius:18px;padding:32px;width:100%;max-width:500px;max-height:90vh;overflow-y:auto">
+      <div style="font-family:var(--fh);font-size:1.8rem;letter-spacing:.1em;color:var(--gold);margin-bottom:4px">☁ CONECTAR NUBE</div>
+      <div style="color:#888;font-size:.82rem;margin-bottom:22px;line-height:1.55">Para que tus cambios persistan en todos los dispositivos, configurá una base de datos gratuita. Es un proceso de 3 minutos.</div>
+
+      <div style="background:rgba(201,168,76,.07);border:1px solid rgba(201,168,76,.15);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:.79rem;line-height:1.8;color:#999">
+        <strong style="color:var(--gold)">1. JSONBin.io — base de datos (REQUERIDO, gratis)</strong><br>
+        → Andá a <a href="https://jsonbin.io" target="_blank" style="color:var(--gold);text-decoration:underline">jsonbin.io</a> y creá cuenta gratis<br>
+        → Menú izquierdo: <em>API Keys</em> → copiá tu <em>Master Key</em>
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#555;display:block;margin-bottom:5px">JSONBin Master Key *</label>
+        <input id="setup-jb-key" type="password" placeholder="\$2b\$10\$..." autocomplete="off" style="width:100%;background:#1a1a1a;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:11px 14px;color:#f5f0e8;font-size:.85rem;font-family:var(--fb);outline:none;transition:border-color .2s" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,.08)'">
+      </div>
+
+      <div style="background:rgba(201,168,76,.07);border:1px solid rgba(201,168,76,.15);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:.79rem;line-height:1.8;color:#999">
+        <strong style="color:var(--gold)">2. Cloudinary — imágenes (OPCIONAL, gratis)</strong><br>
+        → Andá a <a href="https://cloudinary.com" target="_blank" style="color:var(--gold);text-decoration:underline">cloudinary.com</a> y creá cuenta gratis<br>
+        → Dashboard: copiá tu <em>Cloud name</em><br>
+        → Settings → Upload → Upload Presets → New Preset → <em>Unsigned</em> → copiá el nombre<br>
+        <span style="color:#555;font-size:.75rem">Sin esto, las imágenes solo se guardan localmente.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+        <div>
+          <label style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#555;display:block;margin-bottom:5px">Cloud name</label>
+          <input id="setup-cl-name" placeholder="mi-cloud" style="width:100%;background:#1a1a1a;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:11px 14px;color:#f5f0e8;font-size:.85rem;font-family:var(--fb);outline:none" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,.08)'">
+        </div>
+        <div>
+          <label style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#555;display:block;margin-bottom:5px">Upload Preset</label>
+          <input id="setup-cl-preset" placeholder="westi_upload" style="width:100%;background:#1a1a1a;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:11px 14px;color:#f5f0e8;font-size:.85rem;font-family:var(--fb);outline:none" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,.08)'">
+        </div>
+      </div>
+
+      <div id="setup-err" style="display:none;color:#f87171;font-size:.79rem;margin-bottom:12px;padding:10px 14px;background:rgba(248,113,113,.08);border-radius:6px;border:1px solid rgba(248,113,113,.15)"></div>
+
+      <button onclick="runCloudSetup()" style="width:100%;background:var(--gold);color:#000;border:none;border-radius:8px;padding:13px;font-size:.85rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;font-family:var(--fb);transition:background .2s" onmouseover="this.style.background='#D4AF37'" onmouseout="this.style.background='var(--gold)'">
+        ☁ Conectar y guardar en la nube
+      </button>
+      <div style="text-align:center;margin-top:10px">
+        <button onclick="skipCloudSetup()" style="background:none;border:none;color:#444;font-size:.73rem;cursor:pointer;font-family:var(--fb);text-decoration:underline;padding:4px">
+          Usar solo localmente por ahora (los cambios no se verán en otros dispositivos)
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+async function runCloudSetup(){
+  const key=document.getElementById('setup-jb-key').value.trim();
+  const cloudName=document.getElementById('setup-cl-name').value.trim();
+  const cloudPreset=document.getElementById('setup-cl-preset').value.trim();
+  const errEl=document.getElementById('setup-err');
+  errEl.style.display='none';
+  if(!key){errEl.textContent='⚠ Ingresá tu JSONBin Master Key.';errEl.style.display='block';return;}
+  saveCfg({jsonbinKey:key,binId:'',cloudName,cloudPreset});
+  errEl.style.color='#C9A84C';errEl.textContent='Conectando con JSONBin...';errEl.style.display='block';
+  const initialData={settings:S,turnos:getTurnos(),gallery:getGallery(),images:{}};
+  const binId=await createBin('westi-data',initialData);
+  if(!binId){
+    errEl.textContent='❌ Error al conectar. Verificá tu Master Key y que tengas internet.';
+    errEl.style.color='#f87171';errEl.style.display='block';return;}
+  saveCfg({jsonbinKey:key,binId,cloudName,cloudPreset});
+  localStorage.setItem('westi_settings',JSON.stringify(S));
+  const cfgBtn=document.getElementById('cloud-cfg-btn');if(cfgBtn)cfgBtn.style.display='none';
+  document.getElementById('cloud-setup').remove();
+  showToast('☁ Cloud conectado. Todo se guarda permanentemente ✓','ok');
+  updateSyncStatus();
+}
+
+function skipCloudSetup(){
+  sessionStorage.setItem('westi_skip_setup','1');
+  document.getElementById('cloud-setup').remove();
+  showToast('Usando almacenamiento local. Configurá cloud desde el panel cuando quieras.');
+}
 </script>
 </body>
 </html>
