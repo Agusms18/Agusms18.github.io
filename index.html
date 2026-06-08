@@ -848,8 +848,11 @@ function saveCfg(cfg){
 // Admin tiene Master Key → puede escribir
 function hasCfg(){const c=getCfg();return!!(c?.jsonbinKey);}
 // Siempre devuelve el bin correcto — PUBLIC_BIN_ID tiene precedencia
-function getPublicBinId(){return PUBLIC_BIN_ID||localStorage.getItem('westi_public_bin')||getCfg()?.binId||'';}
-function canRead(){return!!getPublicBinId();}
+const PUBLIC_BIN_ID='6a26465ff5f4af5e29c92471';
+
+function getPublicBinId(){
+   return PUBLIC_BIN_ID;
+}function canRead(){return!!getPublicBinId();}
 
 /* ── JSONBin helpers ── */
 const JSONBIN_BASE='https://api.jsonbin.io/v3';
