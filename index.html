@@ -837,9 +837,22 @@ const ICONS={cut:`<svg class="si" viewBox="0 0 24 24" fill="none" stroke="curren
    ════════════════════════════════════════════════════════════ */
 
 /* ── Cloud config ── */
+// PUBLIC_BIN_ID: se escribe aquí después del primer setup del admin.
+// Todos los dispositivos leen de este bin sin necesitar configuración.
+// La Master Key (escritura) solo vive en el localStorage del admin.
+const PUBLIC_BIN_ID = localStorage.getItem('westi_public_bin') || '';
+
 function getCfg(){try{return JSON.parse(localStorage.getItem('westi_cloud_cfg')||'null');}catch(e){return null;}}
-function saveCfg(cfg){localStorage.setItem('westi_cloud_cfg',JSON.stringify(cfg));}
-function hasCfg(){const c=getCfg();return!!(c?.jsonbinKey&&c?.binId);}
+function saveCfg(cfg){
+  localStorage.setItem('westi_cloud_cfg',JSON.stringify(cfg));
+  // Escribir el binId en localStorage público para que este dispositivo también lo tenga
+  if(cfg.binId)localStorage.setItem('westi_public_bin',cfg.binId);
+}
+// Admin tiene Master Key → puede escribir
+function hasCfg(){const c=getCfg();return!!(c?.jsonbinKey&&(c?.binId||PUBLIC_BIN_ID));}
+// Cualquier dispositivo puede leer si tiene el binId público
+function getPublicBinId(){return PUBLIC_BIN_ID||getCfg()?.binId||'';}
+function canRead(){return!!getPublicBinId();}
 
 /* ── JSONBin helpers ── */
 const JSONBIN_BASE='https://api.jsonbin.io/v3';
@@ -847,31 +860,33 @@ const JSONBIN_BASE='https://api.jsonbin.io/v3';
 // Nunca enviar base64 a JSONBin — solo URLs https://
 function isBase64(s){return typeof s==='string'&&(s.startsWith('data:')||s.length>2000);}
 function safeUrl(s){return(s&&!isBase64(s))?s:'';}
+function stripBase64FromGallery(gal){return gal.map(g=>({...g,url:safeUrl(g.url)}));}
+function safeSettings(s){const copy={...s};return copy;}
 
-// Limpiar galería: reemplazar base64 por string vacío (la URL se guarda en Cloudinary)
-function stripBase64FromGallery(gal){
-  return gal.map(g=>({...g,url:safeUrl(g.url)}));
-}
-// Settings seguros: no contienen imágenes, pero por precaución limpiar campos grandes
-function safeSettings(s){
-  const copy={...s};
-  // services y barbers no tienen imágenes — son texto plano. OK.
-  return copy;
-}
-
+// jbGet: lectura pública sin key si el bin es público
 async function jbGet(binId,key){
-  try{const cfg=getCfg();const r=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});if(!r.ok)return null;const data=await r.json();return key?data[key]:data;}catch(e){return null;}}
+  try{
+    const cfg=getCfg();
+    const headers={'X-Bin-Meta':'false'};
+    // Agregar Master Key solo si el admin la tiene (optimiza rate limit)
+    if(cfg?.jsonbinKey)headers['X-Master-Key']=cfg.jsonbinKey;
+    const r=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers});
+    if(!r.ok)return null;
+    const data=await r.json();
+    return key?data[key]:data;
+  }catch(e){return null;}}
 
 async function jbSet(binId,key,value){
   try{
     const cfg=getCfg();
+    if(!cfg?.jsonbinKey){console.warn('[jbSet] No Master Key — solo lectura');return false;}
     let current={};
     const r0=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});
     if(r0.ok)current=await r0.json();
     if(key)current[key]=value;else current=value;
     const body=JSON.stringify(current);
-    console.log('[jbSet] key='+key+' payload size:',body.length,'bytes');
-    if(body.length>200000){console.error('[jbSet] ABORTED — payload exceeds 200KB:',body.length,'bytes for key:',key);return false;}
+    console.log('[jbSet] key='+key+' payload:',body.length,'bytes');
+    if(body.length>200000){console.error('[jbSet] ABORTED >200KB:',body.length,'bytes');return false;}
     const r=await fetch(`${JSONBIN_BASE}/b/${binId}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey},body});
     return r.ok;
   }catch(e){console.error('[jbSet] error:',e);return false;}
@@ -881,10 +896,7 @@ async function createBin(name,initialData){
   const cfg=getCfg();
   const body=JSON.stringify(initialData);
   console.log('[createBin] payload size:',body.length,'bytes');
-  if(body.length>50000){
-    console.error('[createBin] ABORTED — payload exceeds 50KB:',body.length,'bytes');
-    return null;
-  }
+  if(body.length>50000){console.error('[createBin] ABORTED >50KB:',body.length,'bytes');return null;}
   const r=await fetch(`${JSONBIN_BASE}/b`,{
     method:'POST',
     headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},
@@ -920,10 +932,14 @@ async function uploadLocalOnly(file){
 let _syncPending=false;let _syncTimer=null;
 function schedulSync(){_syncPending=true;clearTimeout(_syncTimer);_syncTimer=setTimeout(()=>syncToCloud(),1500);}
 async function syncToCloud(){
-  if(!hasCfg()||!_syncPending)return;_syncPending=false;const cfg=getCfg();
-  const ok=await jbSet(cfg.binId,'settings',S);
+  if(!_syncPending)return;
+  const binId=getPublicBinId();
+  if(!hasCfg()||!binId){_syncPending=false;return;}
+  _syncPending=false;
+  const ok=await jbSet(binId,'settings',S);
   if(ok){showSyncIndicator('ok');localStorage.setItem('westi_settings',JSON.stringify(S));}
-  else{showSyncIndicator('err');_syncPending=true;}}
+  else{showSyncIndicator('err');_syncPending=true;}
+}
 function showSyncIndicator(state){
   let ind=document.getElementById('sync-indicator');if(!ind)return;
   ind.className='sync-ind '+(state==='ok'?'ok':'err');
@@ -962,30 +978,45 @@ let loginAttempts=0;
 
 /* ── STORAGE HELPERS ── */
 async function loadSettings(){
-  if(hasCfg()){const cfg=getCfg();const remote=await jbGet(cfg.binId,'settings');if(remote){S={...DEFAULT,...remote};localStorage.setItem('westi_settings',JSON.stringify(S));return;}}
-  try{const s=localStorage.getItem('westi_settings');S=s?{...DEFAULT,...JSON.parse(s)}:{...DEFAULT}}catch(e){S={...DEFAULT};}}
+  // Cualquier dispositivo puede leer — solo necesita el binId público
+  const binId=getPublicBinId();
+  if(binId){
+    const remote=await jbGet(binId,'settings');
+    if(remote){S={...DEFAULT,...remote};localStorage.setItem('westi_settings',JSON.stringify(S));return;}
+  }
+  // Fallback: caché local
+  try{const s=localStorage.getItem('westi_settings');S=s?{...DEFAULT,...JSON.parse(s)}:{...DEFAULT};}catch(e){S={...DEFAULT};}
+}
 function getTurnos(){try{return JSON.parse(localStorage.getItem('westi_all_turnos')||'[]')}catch(e){return[];}}
 async function saveTurnos(t){
   localStorage.setItem('westi_all_turnos',JSON.stringify(t));
-  if(hasCfg()){const cfg=getCfg();const ok=await jbSet(cfg.binId,'turnos',t);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
+  const binId=getPublicBinId();
+  if(hasCfg()&&binId){const ok=await jbSet(binId,'turnos',t);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}
+}
 function getGallery(){try{const g=localStorage.getItem('westi_gallery');return g?JSON.parse(g):[...DEFAULT_GALLERY];}catch(e){return[...DEFAULT_GALLERY];}}
 async function saveGallery(g){
-  localStorage.setItem('westi_gallery',JSON.stringify(g)); // local: guarda todo incluyendo base64 locales
-  if(hasCfg()){
-    const cfg=getCfg();
-    const safeGal=stripBase64FromGallery(g); // cloud: solo URLs https://
-    const ok=await jbSet(cfg.binId,'gallery',safeGal);
-    if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
+  localStorage.setItem('westi_gallery',JSON.stringify(g));
+  const binId=getPublicBinId();
+  if(hasCfg()&&binId){const safeGal=stripBase64FromGallery(g);const ok=await jbSet(binId,'gallery',safeGal);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}
+}
 function isLoggedIn(){return localStorage.getItem('westi_admin_session')==='active'||sessionStorage.getItem('westi_admin_session')==='active'}
-async function syncTurnosFromCloud(){const remote=hasCfg()?await jbGet(getCfg().binId,'turnos'):null;if(remote){localStorage.setItem('westi_all_turnos',JSON.stringify(remote));renderAdminTable();renderAdminStats();}}
-async function syncGalleryFromCloud(){if(!hasCfg())return;const remote=await jbGet(getCfg().binId,'gallery');if(remote){localStorage.setItem('westi_gallery',JSON.stringify(remote));renderPublicGallery();if(canAccess('galeria'))renderAdminGallery();}}
+async function syncTurnosFromCloud(){
+  const binId=getPublicBinId();if(!binId)return;
+  const remote=await jbGet(binId,'turnos');
+  if(remote){localStorage.setItem('westi_all_turnos',JSON.stringify(remote));renderAdminTable();renderAdminStats();}
+}
+async function syncGalleryFromCloud(){
+  const binId=getPublicBinId();if(!binId)return;
+  const remote=await jbGet(binId,'gallery');
+  if(remote){localStorage.setItem('westi_gallery',JSON.stringify(remote));renderPublicGallery();if(canAccess('galeria'))renderAdminGallery();}
+}
 async function loadCloudImages(){
-  if(!hasCfg())return;
-  const imgs=await jbGet(getCfg().binId,'images');
+  const binId=getPublicBinId();if(!binId)return;
+  const imgs=await jbGet(binId,'images');
   if(!imgs)return;
-  // Solo aceptar URLs https:// del cloud — nunca base64
   if(imgs.hero&&!isBase64(imgs.hero))localStorage.setItem('westi_hero_img',imgs.hero);
-  if(imgs.about&&!isBase64(imgs.about))localStorage.setItem('westi_about_img',imgs.about);}
+  if(imgs.about&&!isBase64(imgs.about))localStorage.setItem('westi_about_img',imgs.about);
+}
 
 /* ── TOAST ── */
 function showToast(msg,type=''){
@@ -1634,9 +1665,10 @@ async function handleImgUpload(ev, target){
     if(!url){showToast('Error al subir a Cloudinary. Verificá las credenciales.','err');return;}
     localStorage.setItem(lsKey,url); // caché local con URL, no base64
     if(hasCfg()){
-      const imgs=(await jbGet(cfg.binId,'images'))||{};
+      const binId=getPublicBinId();
+      const imgs=(await jbGet(binId,'images'))||{};
       imgs[target]=url; // solo URL, nunca base64
-      await jbSet(cfg.binId,'images',imgs);
+      await jbSet(binId,'images',imgs);
     }
     applyImages();
     const prev=document.getElementById(target==='hero'?'hero-img-preview':'about-img-preview');
@@ -1658,13 +1690,14 @@ async function handleImgUpload(ev, target){
 async function resetImg(target){
   const lsKey=target==='hero'?'westi_hero_img':'westi_about_img';
   localStorage.removeItem(lsKey);
-  if(hasCfg()&&getCfg().cloudName){ // solo limpiar cloud si Cloudinary estaba activo
-    const cfg=getCfg();
-    const imgs=(await jbGet(cfg.binId,'images'))||{};
+  if(hasCfg()&&getCfg()?.cloudName){
+    const binId=getPublicBinId();
+    const imgs=(await jbGet(binId,'images'))||{};
     delete imgs[target];
-    await jbSet(cfg.binId,'images',imgs);
+    await jbSet(binId,'images',imgs);
   }
-  applyImages();const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);showToast('Imagen restaurada','ok');}
+  applyImages();const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);showToast('Imagen restaurada','ok');
+}
 function applyImages(){
   const heroImg=localStorage.getItem('westi_hero_img');const aboutImgSrc=localStorage.getItem('westi_about_img');
   const defaultHero='https://images.unsplash.com/photo-1503951914875-452162b0f3f1?w=1600&q=80';
@@ -1874,20 +1907,21 @@ async function runCloudSetup(){
   }
 
   saveCfg({jsonbinKey:key,binId,cloudName,cloudPreset});
+  localStorage.setItem('westi_public_bin',binId); // dispositivo actual ya puede leer
   localStorage.setItem('westi_settings',JSON.stringify(S));
   const cfgBtn=document.getElementById('cloud-cfg-btn');if(cfgBtn)cfgBtn.style.display='none';
   document.getElementById('cloud-setup').remove();
   showToast('☁ Cloud conectado. Todo se guarda permanentemente ✓','ok');
   updateSyncStatus();
 
+  // ── INSTRUCCIÓN PARA MULTI-DISPOSITIVO ──
+  // El admin debe actualizar PUBLIC_BIN_ID en el código para que todos los dispositivos lean.
+  // Mostramos un aviso claro dentro del panel con el binId generado.
+  setTimeout(()=>showBinIdInstructions(binId),800);
+
   // ── Sincronización post-setup en segundo plano ──
-  // Turnos: solo texto plano, siempre seguros
   const existingTurnos=getTurnos();
-  if(existingTurnos.length){
-    const turnosStr=JSON.stringify(existingTurnos);
-    if(turnosStr.length<200000)jbSet(binId,'turnos',existingTurnos).catch(()=>{});
-  }
-  // Galería: SOLO items con URLs https://, nunca base64
+  if(existingTurnos.length){const ts=JSON.stringify(existingTurnos);if(ts.length<200000)jbSet(binId,'turnos',existingTurnos).catch(()=>{});}
   const existingGal=stripBase64FromGallery(getGallery());
   const safeGalItems=existingGal.filter(g=>g.url&&g.url.startsWith('https://'));
   if(safeGalItems.length)jbSet(binId,'gallery',existingGal).catch(()=>{});
@@ -1897,6 +1931,42 @@ function skipCloudSetup(){
   sessionStorage.setItem('westi_skip_setup','1');
   document.getElementById('cloud-setup').remove();
   showToast('Usando almacenamiento local. Configurá cloud desde el panel cuando quieras.');
+}
+
+/* ── Instrucciones post-setup para multi-dispositivo ── */
+function showBinIdInstructions(binId){
+  const box=document.createElement('div');
+  box.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#111;border:1px solid rgba(201,168,76,.5);border-radius:14px;padding:22px 26px;z-index:3700;max-width:540px;width:calc(100% - 48px);box-shadow:0 20px 60px rgba(0,0,0,.8)';
+  box.innerHTML=`
+    <div style="font-family:var(--fh);font-size:1.1rem;color:var(--gold);margin-bottom:8px;letter-spacing:.06em">☁ Paso final — activar en todos los dispositivos</div>
+    <div style="font-size:.8rem;color:#aaa;line-height:1.6;margin-bottom:14px">
+      Para que <strong style="color:#f5f0e8">cualquier dispositivo</strong> cargue los datos automáticamente, abrí el archivo HTML en un editor de texto y buscá esta línea al inicio del JavaScript:<br>
+      <code style="display:block;background:#1a1a1a;border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:.82rem;color:#4ade80;word-break:break-all">const PUBLIC_BIN_ID = localStorage.getItem('westi_public_bin') || '';</code>
+      Reemplazala por:<br>
+      <code style="display:block;background:#1a1a1a;border:1px solid rgba(201,168,76,.3);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:.82rem;color:#C9A84C;word-break:break-all">const PUBLIC_BIN_ID = "${binId}";</code>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button onclick="navigator.clipboard.writeText('const PUBLIC_BIN_ID = \\"${binId}\\";').then(()=>showToast('Copiado ✓','ok'))" style="background:var(--gold);color:#000;border:none;border-radius:6px;padding:9px 16px;font-size:.78rem;font-weight:700;letter-spacing:.06em;cursor:pointer;font-family:var(--fb)">Copiar línea</button>
+      <span style="font-size:.72rem;color:#555">Tu Bin ID: <strong style="color:#888">${binId}</strong></span>
+      <button onclick="this.closest('div[style]').remove()" style="margin-left:auto;background:none;border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:9px 14px;font-size:.75rem;color:#555;cursor:pointer;font-family:var(--fb)">Entendido</button>
+    </div>
+  `;
+  document.body.appendChild(box);
+}
+
+function checkCloudSetupNeeded(){
+  const cfgBtn=document.getElementById('cloud-cfg-btn');
+  const publicBin=getPublicBinId();
+  if(!publicBin&&!hasCfg()){
+    if(cfgBtn)cfgBtn.style.display='';
+    if(!sessionStorage.getItem('westi_skip_setup')){setTimeout(()=>showCloudSetup(),400);}
+  } else {
+    if(cfgBtn)cfgBtn.style.display='none';
+    // Si tiene binId público pero no Master Key → puede leer pero no escribir (visitante normal)
+    if(publicBin&&!getCfg()?.jsonbinKey){
+      console.log('[cloud] Modo lectura — binId disponible, sin Master Key');
+    }
+  }
 }
 </script>
 </body>
