@@ -843,20 +843,67 @@ function hasCfg(){const c=getCfg();return!!(c?.jsonbinKey&&c?.binId);}
 
 /* ── JSONBin helpers ── */
 const JSONBIN_BASE='https://api.jsonbin.io/v3';
+
+// Nunca enviar base64 a JSONBin — solo URLs https://
+function isBase64(s){return typeof s==='string'&&(s.startsWith('data:')||s.length>2000);}
+function safeUrl(s){return(s&&!isBase64(s))?s:'';}
+
+// Limpiar galería: reemplazar base64 por string vacío (la URL se guarda en Cloudinary)
+function stripBase64FromGallery(gal){
+  return gal.map(g=>({...g,url:safeUrl(g.url)}));
+}
+// Settings seguros: no contienen imágenes, pero por precaución limpiar campos grandes
+function safeSettings(s){
+  const copy={...s};
+  // services y barbers no tienen imágenes — son texto plano. OK.
+  return copy;
+}
+
 async function jbGet(binId,key){
   try{const cfg=getCfg();const r=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});if(!r.ok)return null;const data=await r.json();return key?data[key]:data;}catch(e){return null;}}
+
 async function jbSet(binId,key,value){
-  try{const cfg=getCfg();let current={};const r0=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});if(r0.ok)current=await r0.json();if(key)current[key]=value;else current=value;const r=await fetch(`${JSONBIN_BASE}/b/${binId}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey},body:JSON.stringify(current)});return r.ok;}catch(e){return false;}}
+  try{
+    const cfg=getCfg();
+    let current={};
+    const r0=await fetch(`${JSONBIN_BASE}/b/${binId}/latest`,{headers:{'X-Master-Key':cfg.jsonbinKey,'X-Bin-Meta':'false'}});
+    if(r0.ok)current=await r0.json();
+    if(key)current[key]=value;else current=value;
+    const body=JSON.stringify(current);
+    // Guard: si el payload supera 200KB, loguear error y abortar
+    if(body.length>200000){console.error('JSONBin payload too large:',body.length,'bytes — aborted');return false;}
+    const r=await fetch(`${JSONBIN_BASE}/b/${binId}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey},body});
+    return r.ok;
+  }catch(e){return false;}}
+
 async function createBin(name,initialData){
-  const cfg=getCfg();const r=await fetch(`${JSONBIN_BASE}/b`,{method:'POST',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},body:JSON.stringify(initialData)});if(!r.ok)return null;const d=await r.json();return d.metadata?.id||null;}
+  const cfg=getCfg();
+  const body=JSON.stringify(initialData);
+  if(body.length>200000){console.error('createBin payload too large:',body.length,'bytes');return null;}
+  const r=await fetch(`${JSONBIN_BASE}/b`,{method:'POST',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},body});
+  if(!r.ok){const t=await r.text().catch(()=>'');console.error('createBin failed:',r.status,t);return null;}
+  const d=await r.json();return d.metadata?.id||null;}
 
 /* ── Cloudinary ── */
+// REGLA: solo URLs https:// van a JSONBin. Base64 NUNCA.
 async function uploadToCloudinary(file){
   const cfg=getCfg();
-  if(!cfg?.cloudName||!cfg?.cloudPreset){return new Promise(res=>{const fr=new FileReader();fr.onload=e=>res(e.target.result);fr.readAsDataURL(file);});}
+  if(!cfg?.cloudName||!cfg?.cloudPreset){
+    // Sin Cloudinary → no podemos guardar imagen de forma persistente y cross-device
+    // Devolvemos null para que el caller muestre un aviso claro
+    return null;
+  }
   const fd=new FormData();fd.append('file',file);fd.append('upload_preset',cfg.cloudPreset);
-  try{const r=await fetch(`https://api.cloudinary.com/v1_1/${cfg.cloudName}/image/upload`,{method:'POST',body:fd});if(!r.ok)throw new Error();const d=await r.json();return d.secure_url||null;}
-  catch(e){return new Promise(res=>{const fr=new FileReader();fr.onload=e=>res(e.target.result);fr.readAsDataURL(file);});}}
+  try{
+    const r=await fetch(`https://api.cloudinary.com/v1_1/${cfg.cloudName}/image/upload`,{method:'POST',body:fd});
+    if(!r.ok){const t=await r.text().catch(()=>'');console.error('Cloudinary error:',r.status,t);return null;}
+    const d=await r.json();
+    return d.secure_url||null;
+  }catch(e){console.error('Cloudinary upload failed:',e);return null;}}
+
+// Fallback local-only: base64 guardado SOLO en localStorage, nunca en JSONBin
+async function uploadLocalOnly(file){
+  return new Promise(res=>{const fr=new FileReader();fr.onload=e=>res(e.target.result);fr.readAsDataURL(file);});}
 
 /* ── Sync engine ── */
 let _syncPending=false;let _syncTimer=null;
@@ -912,12 +959,22 @@ async function saveTurnos(t){
   if(hasCfg()){const cfg=getCfg();const ok=await jbSet(cfg.binId,'turnos',t);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
 function getGallery(){try{const g=localStorage.getItem('westi_gallery');return g?JSON.parse(g):[...DEFAULT_GALLERY];}catch(e){return[...DEFAULT_GALLERY];}}
 async function saveGallery(g){
-  localStorage.setItem('westi_gallery',JSON.stringify(g));
-  if(hasCfg()){const cfg=getCfg();const ok=await jbSet(cfg.binId,'gallery',g);if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
+  localStorage.setItem('westi_gallery',JSON.stringify(g)); // local: guarda todo incluyendo base64 locales
+  if(hasCfg()){
+    const cfg=getCfg();
+    const safeGal=stripBase64FromGallery(g); // cloud: solo URLs https://
+    const ok=await jbSet(cfg.binId,'gallery',safeGal);
+    if(ok)showSyncIndicator('ok');else showSyncIndicator('err');}}
 function isLoggedIn(){return localStorage.getItem('westi_admin_session')==='active'||sessionStorage.getItem('westi_admin_session')==='active'}
 async function syncTurnosFromCloud(){const remote=hasCfg()?await jbGet(getCfg().binId,'turnos'):null;if(remote){localStorage.setItem('westi_all_turnos',JSON.stringify(remote));renderAdminTable();renderAdminStats();}}
 async function syncGalleryFromCloud(){if(!hasCfg())return;const remote=await jbGet(getCfg().binId,'gallery');if(remote){localStorage.setItem('westi_gallery',JSON.stringify(remote));renderPublicGallery();if(canAccess('galeria'))renderAdminGallery();}}
-async function loadCloudImages(){if(!hasCfg())return;const imgs=await jbGet(getCfg().binId,'images');if(!imgs)return;if(imgs.hero)localStorage.setItem('westi_hero_img',imgs.hero);if(imgs.about)localStorage.setItem('westi_about_img',imgs.about);}
+async function loadCloudImages(){
+  if(!hasCfg())return;
+  const imgs=await jbGet(getCfg().binId,'images');
+  if(!imgs)return;
+  // Solo aceptar URLs https:// del cloud — nunca base64
+  if(imgs.hero&&!isBase64(imgs.hero))localStorage.setItem('westi_hero_img',imgs.hero);
+  if(imgs.about&&!isBase64(imgs.about))localStorage.setItem('westi_about_img',imgs.about);}
 
 /* ── TOAST ── */
 function showToast(msg,type=''){
@@ -1239,19 +1296,36 @@ async function apDelete(id){
 function apHandleUpload(ev){
   const files=Array.from(ev.target.files);
   if(!files.length)return;
+  const cfg=getCfg();
+  const hasCloudinary=!!(cfg?.cloudName&&cfg?.cloudPreset);
   const gal=getGallery();
   let pending=files.length;
+
   files.forEach(file=>{
-    const reader=new FileReader();
-    reader.onload=e=>{
-      const url=e.target.result;
-      const empty=gal.findIndex(g=>!g.url);
-      if(empty>=0)gal[empty]={...gal[empty],url};
-      else gal.push({id:'g'+Date.now()+Math.random(),url,label:'Nueva imagen',type:'normal'});
-      pending--;
-      if(pending===0){saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast(`${files.length} imagen(es) subidas`,'ok');}
-    };
-    reader.readAsDataURL(file);
+    if(hasCloudinary){
+      // Ruta cloud: Cloudinary → URL → JSONBin
+      showToast('Subiendo a Cloudinary...');
+      uploadToCloudinary(file).then(url=>{
+        if(!url){showToast('Error al subir imagen a Cloudinary','err');pending--;return;}
+        const empty=gal.findIndex(g=>!g.url);
+        if(empty>=0)gal[empty]={...gal[empty],url};
+        else gal.push({id:'g'+Date.now()+Math.random(),url,label:'Nueva imagen',type:'normal'});
+        pending--;
+        if(pending===0){saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast(`${files.length} imagen(es) subidas ✓`,'ok');}
+      });
+    } else {
+      // Ruta local: base64 solo en localStorage (saveGallery lo filtra antes de JSONBin)
+      const reader=new FileReader();
+      reader.onload=e=>{
+        const url=e.target.result;
+        const empty=gal.findIndex(g=>!g.url);
+        if(empty>=0)gal[empty]={...gal[empty],url};
+        else gal.push({id:'g'+Date.now()+Math.random(),url,label:'Nueva imagen',type:'normal'});
+        pending--;
+        if(pending===0){saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast(`${files.length} imagen(es) subidas (solo local)`,'ok');}
+      };
+      reader.readAsDataURL(file);
+    }
   });
   ev.target.value='';
 }
@@ -1261,13 +1335,23 @@ function apChangeImage(id){
   inp.type='file';inp.accept='image/*';
   inp.onchange=ev=>{
     const file=ev.target.files[0];if(!file)return;
-    const reader=new FileReader();
-    reader.onload=e=>{
-      const gal=getGallery();
-      const item=gal.find(g=>g.id===id);
-      if(item){item.url=e.target.result;saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast('Imagen actualizada','ok');}
-    };
-    reader.readAsDataURL(file);
+    const cfg=getCfg();
+    const hasCloudinary=!!(cfg?.cloudName&&cfg?.cloudPreset);
+    if(hasCloudinary){
+      showToast('Subiendo a Cloudinary...');
+      uploadToCloudinary(file).then(url=>{
+        if(!url){showToast('Error Cloudinary','err');return;}
+        const gal=getGallery();const item=gal.find(g=>g.id===id);
+        if(item){item.url=url;saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast('Imagen actualizada ✓','ok');}
+      });
+    } else {
+      const reader=new FileReader();
+      reader.onload=e=>{
+        const gal=getGallery();const item=gal.find(g=>g.id===id);
+        if(item){item.url=e.target.result;saveGallery(gal);renderAdminGallery();renderPublicGallery();showToast('Imagen actualizada (solo local)','ok');}
+      };
+      reader.readAsDataURL(file);
+    }
   };
   inp.click();
 }
@@ -1528,21 +1612,47 @@ function liveUpdate(key,value){S[key]=value;applySettings();localStorage.setItem
 /* ── IMAGE MANAGEMENT (hero bg + about/nosotros) ── */
 async function handleImgUpload(ev, target){
   const file=ev.target.files[0]; if(!file)return;
-  showToast('Subiendo imagen... ☁');
-  const url=await uploadToCloudinary(file);
-  if(!url){showToast('Error al subir imagen','err');return;}
   const lsKey=target==='hero'?'westi_hero_img':'westi_about_img';
-  localStorage.setItem(lsKey,url);
-  if(hasCfg()){const cfg=getCfg();const imgs=(await jbGet(cfg.binId,'images'))||{};imgs[target]=url;await jbSet(cfg.binId,'images',imgs);}
-  applyImages();
-  const prev=document.getElementById(target==='hero'?'hero-img-preview':'about-img-preview');
-  if(prev)prev.src=url;
-  const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);
-  showToast('Imagen guardada ✓','ok');}
+  const cfg=getCfg();
+  const hasCloudinary=!!(cfg?.cloudName&&cfg?.cloudPreset);
+
+  if(hasCloudinary){
+    // Ruta cloud: subir a Cloudinary → guardar URL en JSONBin
+    showToast('Subiendo imagen a Cloudinary... ☁');
+    const url=await uploadToCloudinary(file);
+    if(!url){showToast('Error al subir a Cloudinary. Verificá las credenciales.','err');return;}
+    localStorage.setItem(lsKey,url); // caché local con URL, no base64
+    if(hasCfg()){
+      const imgs=(await jbGet(cfg.binId,'images'))||{};
+      imgs[target]=url; // solo URL, nunca base64
+      await jbSet(cfg.binId,'images',imgs);
+    }
+    applyImages();
+    const prev=document.getElementById(target==='hero'?'hero-img-preview':'about-img-preview');
+    if(prev)prev.src=url;
+    const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);
+    showToast('Imagen guardada en la nube ✓','ok');
+  } else {
+    // Ruta local-only: base64 SOLO en localStorage, NO en JSONBin
+    showToast('Sin Cloudinary — guardando solo en este dispositivo...');
+    const dataUrl=await uploadLocalOnly(file);
+    localStorage.setItem(lsKey,dataUrl);
+    // NO llamar jbSet aquí — el base64 no va a JSONBin jamás
+    applyImages();
+    const prev=document.getElementById(target==='hero'?'hero-img-preview':'about-img-preview');
+    if(prev)prev.src=dataUrl;
+    const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);
+    showToast('Imagen guardada localmente. Configurá Cloudinary para sincronizar entre dispositivos.');
+  }}
 async function resetImg(target){
   const lsKey=target==='hero'?'westi_hero_img':'westi_about_img';
   localStorage.removeItem(lsKey);
-  if(hasCfg()){const cfg=getCfg();const imgs=(await jbGet(cfg.binId,'images'))||{};delete imgs[target];await jbSet(cfg.binId,'images',imgs);}
+  if(hasCfg()&&getCfg().cloudName){ // solo limpiar cloud si Cloudinary estaba activo
+    const cfg=getCfg();
+    const imgs=(await jbGet(cfg.binId,'images'))||{};
+    delete imgs[target];
+    await jbSet(cfg.binId,'images',imgs);
+  }
   applyImages();const b=document.getElementById('ap-pers-body');if(b)renderApPersContent('imagen',b);showToast('Imagen restaurada','ok');}
 function applyImages(){
   const heroImg=localStorage.getItem('westi_hero_img');const aboutImgSrc=localStorage.getItem('westi_about_img');
@@ -1686,8 +1796,15 @@ async function runCloudSetup(){
   if(!key){errEl.textContent='⚠ Ingresá tu JSONBin Master Key.';errEl.style.display='block';return;}
   saveCfg({jsonbinKey:key,binId:'',cloudName,cloudPreset});
   errEl.style.color='#C9A84C';errEl.textContent='Conectando con JSONBin...';errEl.style.display='block';
-  const initialData={settings:S,turnos:getTurnos(),gallery:getGallery(),images:{}};
-  const binId=await createBin('westi-data',initialData);
+  // initialData MÍNIMO: solo skeleton, sin imágenes, sin base64, sin galería completa
+  // Las galerías y turnos existentes se sincronizan después en segundo plano
+  const safeInitial={
+    settings:safeSettings(S),  // texto y configuración — sin imágenes
+    turnos:[],                   // empezar vacío; se llena después
+    gallery:[],                  // empezar vacío; se sincroniza después
+    images:{}                    // URLs de hero/about — vacío al inicio
+  };
+  const binId=await createBin('westi-data',safeInitial);
   if(!binId){
     errEl.textContent='❌ Error al conectar. Verificá tu Master Key y que tengas internet.';
     errEl.style.color='#f87171';errEl.style.display='block';return;}
@@ -1697,6 +1814,14 @@ async function runCloudSetup(){
   document.getElementById('cloud-setup').remove();
   showToast('☁ Cloud conectado. Todo se guarda permanentemente ✓','ok');
   updateSyncStatus();
+  // Sincronizar datos existentes en segundo plano (sin bloquear UI)
+  // Turnos: texto plano, safe
+  const existingTurnos=getTurnos();
+  if(existingTurnos.length)jbSet(binId,'turnos',existingTurnos).catch(()=>{});
+  // Galería: solo URLs, sin base64
+  const existingGal=stripBase64FromGallery(getGallery());
+  const hasGalData=existingGal.some(g=>g.url&&g.url.startsWith('https://'));
+  if(hasGalData)jbSet(binId,'gallery',existingGal).catch(()=>{});
 }
 
 function skipCloudSetup(){
