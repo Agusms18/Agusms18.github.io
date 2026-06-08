@@ -870,19 +870,30 @@ async function jbSet(binId,key,value){
     if(r0.ok)current=await r0.json();
     if(key)current[key]=value;else current=value;
     const body=JSON.stringify(current);
-    // Guard: si el payload supera 200KB, loguear error y abortar
-    if(body.length>200000){console.error('JSONBin payload too large:',body.length,'bytes — aborted');return false;}
+    console.log('[jbSet] key='+key+' payload size:',body.length,'bytes');
+    if(body.length>200000){console.error('[jbSet] ABORTED — payload exceeds 200KB:',body.length,'bytes for key:',key);return false;}
     const r=await fetch(`${JSONBIN_BASE}/b/${binId}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey},body});
     return r.ok;
-  }catch(e){return false;}}
+  }catch(e){console.error('[jbSet] error:',e);return false;}
+}
 
 async function createBin(name,initialData){
   const cfg=getCfg();
   const body=JSON.stringify(initialData);
-  if(body.length>200000){console.error('createBin payload too large:',body.length,'bytes');return null;}
-  const r=await fetch(`${JSONBIN_BASE}/b`,{method:'POST',headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},body});
-  if(!r.ok){const t=await r.text().catch(()=>'');console.error('createBin failed:',r.status,t);return null;}
-  const d=await r.json();return d.metadata?.id||null;}
+  console.log('[createBin] payload size:',body.length,'bytes');
+  if(body.length>50000){
+    console.error('[createBin] ABORTED — payload exceeds 50KB:',body.length,'bytes');
+    return null;
+  }
+  const r=await fetch(`${JSONBIN_BASE}/b`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Master-Key':cfg.jsonbinKey,'X-Bin-Name':name,'X-Bin-Private':'false'},
+    body
+  });
+  if(!r.ok){const t=await r.text().catch(()=>'');console.error('[createBin] HTTP',r.status,t);return null;}
+  const d=await r.json();
+  return d.metadata?.id||null;
+}
 
 /* ── Cloudinary ── */
 // REGLA: solo URLs https:// van a JSONBin. Base64 NUNCA.
@@ -1796,32 +1807,90 @@ async function runCloudSetup(){
   if(!key){errEl.textContent='⚠ Ingresá tu JSONBin Master Key.';errEl.style.display='block';return;}
   saveCfg({jsonbinKey:key,binId:'',cloudName,cloudPreset});
   errEl.style.color='#C9A84C';errEl.textContent='Conectando con JSONBin...';errEl.style.display='block';
-  // initialData MÍNIMO: solo skeleton, sin imágenes, sin base64, sin galería completa
-  // Las galerías y turnos existentes se sincronizan después en segundo plano
-  const safeInitial={
-    settings:safeSettings(S),  // texto y configuración — sin imágenes
-    turnos:[],                   // empezar vacío; se llena después
-    gallery:[],                  // empezar vacío; se sincroniza después
-    images:{}                    // URLs de hero/about — vacío al inicio
+
+  // ── Sanitizar settings: SOLO campos primitivos conocidos, sin imágenes ni base64 ──
+  const cleanSettings={
+    name:String(S.name||'WESTI'),
+    tagline:String(S.tagline||''),
+    eyebrow:String(S.eyebrow||''),
+    colorGold:String(S.colorGold||'#C9A84C'),
+    colorBg:String(S.colorBg||'#0A0A0A'),
+    colorCream:String(S.colorCream||'#F5F0E8'),
+    fontHeading:String(S.fontHeading||'Bebas Neue'),
+    fontBody:String(S.fontBody||'DM Sans'),
+    whatsapp:String(S.whatsapp||''),
+    address:String(S.address||''),
+    hours:String(S.hours||''),
+    instagram:String(S.instagram||''),
+    tiktok:String(S.tiktok||''),
+    aboutTitle:String(S.aboutTitle||''),
+    aboutLabel:String(S.aboutLabel||''),
+    aboutText1:String(S.aboutText1||''),
+    aboutText2:String(S.aboutText2||''),
+    stat1:String(S.stat1||''),stat1l:String(S.stat1l||''),
+    stat2:String(S.stat2||''),stat2l:String(S.stat2l||''),
+    stat3:String(S.stat3||''),stat3l:String(S.stat3l||''),
+    closedDays:Array.isArray(S.closedDays)?S.closedDays:[0],
+    openHour:Number(S.openHour||9),
+    closeHour:Number(S.closeHour||19),
+    slotMin:Number(S.slotMin||30),
+    // Servicios: solo campos de texto, sin imágenes
+    services:(S.services||[]).map(s=>({
+      id:String(s.id),name:String(s.name),
+      desc:String(s.desc),price:String(s.price),icon:String(s.icon)
+    })),
+    // Barberos: solo campos de texto
+    barbers:(S.barbers||[]).map(b=>({
+      id:String(b.id),name:String(b.name),
+      tag:String(b.tag),initials:String(b.initials)
+    }))
   };
-  const binId=await createBin('westi-data',safeInitial);
+
+  // ── initialData ABSOLUTAMENTE mínimo ──
+  // REGLA: gallery:[], turnos:[], images:{} — NUNCA getGallery() ni getTurnos() aquí
+  const initialData={
+    settings:cleanSettings,
+    turnos:[],
+    gallery:[],
+    images:{}
+  };
+
+  // ── Diagnóstico y validación de tamaño ──
+  const bodyStr=JSON.stringify(initialData);
+  console.log('CREATE BIN SIZE',bodyStr.length,'bytes');
+  console.log('settings size',JSON.stringify(cleanSettings).length,'bytes');
+
+  if(bodyStr.length>50000){
+    console.error('initialData demasiado grande:',bodyStr.length,'bytes — abortando');
+    errEl.textContent=`❌ Error interno: initialData demasiado grande (${bodyStr.length} bytes). Recargá la página e intentá de nuevo.`;
+    errEl.style.color='#f87171';errEl.style.display='block';
+    return;
+  }
+
+  const binId=await createBin('westi-data',initialData);
   if(!binId){
-    errEl.textContent='❌ Error al conectar. Verificá tu Master Key y que tengas internet.';
-    errEl.style.color='#f87171';errEl.style.display='block';return;}
+    errEl.textContent='❌ Error al conectar con JSONBin. Verificá tu Master Key y que tengas internet.';
+    errEl.style.color='#f87171';errEl.style.display='block';return;
+  }
+
   saveCfg({jsonbinKey:key,binId,cloudName,cloudPreset});
   localStorage.setItem('westi_settings',JSON.stringify(S));
   const cfgBtn=document.getElementById('cloud-cfg-btn');if(cfgBtn)cfgBtn.style.display='none';
   document.getElementById('cloud-setup').remove();
   showToast('☁ Cloud conectado. Todo se guarda permanentemente ✓','ok');
   updateSyncStatus();
-  // Sincronizar datos existentes en segundo plano (sin bloquear UI)
-  // Turnos: texto plano, safe
+
+  // ── Sincronización post-setup en segundo plano ──
+  // Turnos: solo texto plano, siempre seguros
   const existingTurnos=getTurnos();
-  if(existingTurnos.length)jbSet(binId,'turnos',existingTurnos).catch(()=>{});
-  // Galería: solo URLs, sin base64
+  if(existingTurnos.length){
+    const turnosStr=JSON.stringify(existingTurnos);
+    if(turnosStr.length<200000)jbSet(binId,'turnos',existingTurnos).catch(()=>{});
+  }
+  // Galería: SOLO items con URLs https://, nunca base64
   const existingGal=stripBase64FromGallery(getGallery());
-  const hasGalData=existingGal.some(g=>g.url&&g.url.startsWith('https://'));
-  if(hasGalData)jbSet(binId,'gallery',existingGal).catch(()=>{});
+  const safeGalItems=existingGal.filter(g=>g.url&&g.url.startsWith('https://'));
+  if(safeGalItems.length)jbSet(binId,'gallery',existingGal).catch(()=>{});
 }
 
 function skipCloudSetup(){
